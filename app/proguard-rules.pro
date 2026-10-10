@@ -1,8 +1,8 @@
 # 只有 release 开了 isMinifyEnabled=true 时这些规则才生效
-# 入口类是靠 assets/xposed_init 里的字符串反射加载的，R8 看不见引用，必须 keep
+# 入口类是靠 META-INF/xposed/java_init.list 里的字符串反射加载的，R8 看不见引用，必须 keep
 -keep class com.jmcomic.hook.MainHook
--keep class * implements de.robv.android.xposed.IXposedHookLoadPackage
--dontwarn de.robv.android.xposed.**
+-keep class * implements io.github.libxposed.api.XposedModuleInterface
+-dontwarn io.github.libxposed.**
 
 # DexKit：DexKitBridge 的 native 方法在 C++ 侧按类/方法名注册，混淆改名会直接断，
 # 整包 keep（含 FlatBuffers 编解码依赖）

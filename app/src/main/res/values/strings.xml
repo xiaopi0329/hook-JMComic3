@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">hook-JMComic3</string>
+    <!-- 现代 API：模块描述直接用 application 的 android:description -->
+    <string name="xposed_description">JMComic3 去广告 + 繁简转换 + 每日自动签到（libxposed API 102）</string>
 </resources>

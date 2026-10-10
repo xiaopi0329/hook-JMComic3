@@ -1,25 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Xposed 模块四件套之一：模块声明（缺了框架就发现不了本 App） -->
+    <!-- libxposed 现代 API：模块身份不再靠 meta-data，改由 META-INF/xposed/ 声明
+         （java_init.list=入口类, module.prop=API 版本, scope.list=作用域）。
+         名称用 android:label，描述用 android:description。 -->
     <application
         android:label="@string/app_name"
+        android:description="@string/xposed_description"
         android:allowBackup="false"
         android:supportsRtl="true">
-
-        <meta-data
-            android:name="xposedmodule"
-            android:value="true" />
-        <meta-data
-            android:name="xposeddescription"
-            android:value="JMComic3 去广告 + 繁简转换 + 每日自动签到" />
-        <meta-data
-            android:name="xposedminversion"
-            android:value="54" />
-        <!-- 预设作用域（目标 App 包名数组），见 res/values/arrays.xml -->
-        <meta-data
-            android:name="xposedscope"
-            android:resource="@array/xposedscope" />
     </application>
 
 </manifest>

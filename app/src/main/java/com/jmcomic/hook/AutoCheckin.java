@@ -5,8 +5,6 @@ import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
 import android.util.Base64;
 
-import de.robv.android.xposed.XposedBridge;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -66,6 +64,12 @@ final class AutoCheckin {
 
     private static volatile boolean sStarted = false;
 
+    /** 热重载停机标志（旧代 MainHook.onHotReloading 置位；线程在尝试边界退出） */
+    private static volatile boolean sStopping = false;
+
+    /** 签到线程引用（仅停机时 interrupt 用） */
+    private static volatile Thread sThread;
+
     private AutoCheckin() {
     }
 
@@ -75,21 +79,47 @@ final class AutoCheckin {
             return;
         }
         sStarted = true;
-        new Thread(() -> {
-            for (int attempt = 0; attempt < 4; attempt++) {
+        Thread t = new Thread(() -> {
+            for (int attempt = 0; attempt < 4 && !sStopping; attempt++) {
                 try {
                     Thread.sleep(attempt == 0 ? 8000L : 20000L);
+                    if (sStopping) {
+                        log("自动签到：收到停机请求，退出");
+                        return;
+                    }
                     Outcome o = run(ctx);
                     if (o == Outcome.NOT_LOGGED_IN) {
                         continue;   // 可能还没登录完成，稍后重试
                     }
                     return;         // 成功 / 今天已办过 / 凭据齐全但接口失败（不再重试，避免骚扰服务端）
-                } catch (Throwable t) {
-                    log("自动签到异常: " + t);
+                } catch (Throwable th) {
+                    if (sStopping) {
+                        log("自动签到：停机打断，退出");
+                        return;
+                    }
+                    log("自动签到异常: " + th);
                 }
             }
-            log("自动签到放弃（未取得登录凭据）");
-        }, "jm-autocheckin").start();
+            if (!sStopping) {
+                log("自动签到放弃（未取得登录凭据）");
+            }
+        }, "jm-autocheckin");
+        sThread = t;
+        t.start();
+    }
+
+    /**
+     * 热重载停机：置标志并打断睡眠。线程在下一个边界退出；
+     * 正在进行的 HTTP 请求会跑完，但不再发起新尝试。
+     * 旧代必须等这个线程结束，旧 classloader 才可能被回收（API 102 热重载契约）。
+     */
+    static Thread stopForHotReload() {
+        sStopping = true;
+        Thread t = sThread;
+        if (t != null) {
+            t.interrupt();
+        }
+        return t;
     }
 
     private enum Outcome { DONE, NOT_LOGGED_IN }
@@ -609,6 +639,6 @@ final class AutoCheckin {
     }
 
     private static void log(String msg) {
-        XposedBridge.log(TAG + " " + msg);
+        MainHook.log(TAG + " " + msg);
     }
 }

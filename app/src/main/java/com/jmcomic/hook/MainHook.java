@@ -1,8 +1,10 @@
 package com.jmcomic.hook;
 
+import android.content.pm.ApplicationInfo;
 import android.graphics.Bitmap;
 import android.net.Uri;
 import android.util.Base64;
+import android.util.Log;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
@@ -14,13 +16,15 @@ import org.luckypray.dexkit.query.matchers.MethodMatcher;
 import org.luckypray.dexkit.result.MethodData;
 import org.luckypray.dexkit.result.MethodDataList;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XposedHelpers;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import io.github.libxposed.api.XposedInterface;
+import io.github.libxposed.api.XposedModule;
+import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam;
+import io.github.libxposed.api.XposedModuleInterface.HotReloadingParam;
+import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
+import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 
 import java.io.ByteArrayInputStream;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HashMap;
@@ -58,10 +62,19 @@ import javax.crypto.spec.SecretKeySpec;
  *                                     而 img 为空 → imgRandomItem=[]、app_pop3 弹窗门为 false）
  *   advertise       → {"adv":[]}    （游戏/影视 banner：return res.data.adv → 空数组）
  *   ad_content      → {"adv":[]}    （防御：当前前端仅定义未调用）
+ *
+ * libxposed API 102（现代 API）迁移要点：
+ *  - 入口 extends XposedModule（不再 implements IXposedHookLoadPackage），
+ *    声明文件为 META-INF/xposed/java_init.list（不再 assets/xposed_init）；
+ *  - handleLoadPackage → onPackageReady（ClassLoader 就绪后触发，等价原 lpparam）；
+ *  - XC_MethodHook before/after → 拦截器链 Hooker.intercept(Chain)：
+ *    "after 后覆盖结果" = chain.proceed() 拿原结果再按需替换；
+ *  - XposedBridge.log → XposedInterface.log(priority, tag, msg)；
+ *  - 框架侧异常兜底用 ExceptionMode.PROTECTIVE（hooker 抛异常时按原方法继续，不崩宿主）。
  */
-public class MainHook implements IXposedHookLoadPackage {
+public class MainHook extends XposedModule {
 
-    /** 目标 App 包名（改这里！同时必须改 res/values/arrays.xml 的 xposedscope） */
+    /** 目标 App 包名（改这里！同时必须改 resources/META-INF/xposed/scope.list） */
     private static final String TARGET_PKG = "com.a7m3p9xv.t6qk2z8.app";
 
     /** 日志前缀（与 README 排错说明保持一致） */
@@ -97,7 +110,20 @@ public class MainHook implements IXposedHookLoadPackage {
             var origSet = proto.setItem;
             proto.setItem = function (k, v) {
               if (k === "memberInfo") { v = enforceAdFree(v); }
-              return origSet.call(this, k, v);
+              var r = origSet.call(this, k, v);
+              if (k === "apiUrl") {
+                try {
+                  // 捷径：线路选定即视为已通过开屏链。写 state=true 正是宿主
+                  // ThreeCover.handleAction 自己写的键（同值同语义）；Main.tsx 的
+                  // useEffect([mainStatus]) 会在下一次 render 直接 setCoverOpen(6)，
+                  // 跳过 switchHost 500ms + 按钮等待 + handleAction 400ms 全部定时。
+                  // handleNext 的 coverOpen<6 守卫让后续 onNext 全变 no-op，热更新
+                  // 弹窗优先级（showHotUpdateModal 分支）不受影响。
+                  sessionStorage.setItem("state", JSON.stringify(true));
+                  startCoverSkip();   // 兜底扫描器保留：万一状态机没推进，仍会点按钮
+                } catch (e) {}
+              }
+              return r;
             };
             // 顺手清掉缓存的广告数据（旧的在 localStorage，新的全走内存）
             try { proto.removeItem("adsList"); proto.removeItem("adsContent"); } catch (e) {}
@@ -135,53 +161,228 @@ public class MainHook implements IXposedHookLoadPackage {
               return origFetch.apply(this, arguments);
             };
           }
+
+          // ③ 选线后自动跳过开屏覆盖层（FirstCover 选完线路 -> 直接进正文）。
+          //    覆盖层链：SecondCover 的 X（3 秒后才出现）、ThreeCover/FourCover 的
+          //    "我已年滿18歲" 大按钮与 X —— 点它们走宿主自己的 handleAction，
+          //    由 React 状态机推进到正文（coverOpen=6），绝不去伪造内部状态。
+          //    只点"全屏 z-50 覆盖容器里的 button"：广告链接是 a/Link，碰不到；
+          //    FirstCover 自己的线路按钮（rounded-full w-2/5）与退出对话框不在匹配形状内。
+          var skipTimer = null;
+          var routeAutoPicked = false;
+          // 预写捷径：apiUrl 是宿主持久化的上次选定线路。有它 = 老用户回访，
+          // 直接写 state=true（与 ThreeCover.handleAction 同键同值），Main.tsx 挂载时
+          // 的 useEffect([mainStatus]) 会 setCoverOpen(6) 一步进正文，选线页根本不出现。
+          // 想换线路走 个人中心→SpeedTest（宿主自带）。首次安装无 apiUrl 时不预写，
+          // 由 autoPickRoute 代点第一条（宿主 App.tsx 本来就是随机选线，等价）。
+          try {
+            if (localStorage.getItem("apiUrl")) {
+              sessionStorage.setItem("state", JSON.stringify(true));
+            }
+          } catch (e) {}
+          function coverInFullScreen(el) {
+            for (var p = el; p && p !== document.body; p = p.parentElement) {
+              var c = typeof p.className === "string" ? p.className : "";
+              if (c.indexOf("z-50") >= 0 && (c.indexOf("absolute left-0 top-0") >= 0 || c.indexOf("fixed inset-0") >= 0)) return true;
+            }
+            return false;
+          }
+          function clickCoverButtons() {
+            var bs = document.querySelectorAll("button");
+            for (var j = 0; j < bs.length; j++) {
+              var b = bs[j];
+              if (b.disabled || !coverInFullScreen(b)) continue;
+              var cn = typeof b.className === "string" ? b.className : "";
+              var age = cn.indexOf("bg-og") >= 0 && cn.indexOf("w-4/5") >= 0;
+              var close = cn.indexOf("rounded-3xl") >= 0 && cn.indexOf("w-8") >= 0 && cn.indexOf("h-8") >= 0;
+              if (age || close) { b.click(); }
+            }
+          }
+          // 选线页自动挑第一条线路：宿主 App.tsx 本来也是 getRandomItems 随机选线，
+          // 列表顺序即宿主自己的候选序。只在本次注入周期里点一次（routeAutoPicked），
+          // 点了之后 apiUrl 写入会接着触发 state=true 捷径 + 覆盖层扫描。
+          function autoPickRoute() {
+            if (routeAutoPicked) return;
+            try { if (localStorage.getItem("apiUrl")) return; } catch (e) {}
+            if (!document.body || document.body.innerText.indexOf("请选择网络") < 0
+                && document.body.innerText.indexOf("請選擇網路") < 0) return;
+            var bs = document.querySelectorAll("button");
+            for (var j = 0; j < bs.length; j++) {
+              var cn = typeof bs[j].className === "string" ? bs[j].className : "";
+              // FirstCover 线路按钮形状：rounded-full w-2/5 p-3 mb-5（覆盖层里没有别的这个组合）
+              if (cn.indexOf("rounded-full") >= 0 && cn.indexOf("w-2/5") >= 0 && !bs[j].disabled) {
+                routeAutoPicked = true;
+                bs[j].click();
+                return;
+              }
+            }
+          }
+          function startCoverSkip() {
+            if (skipTimer) { clearInterval(skipTimer); }
+            var until = Date.now() + 20000;
+            skipTimer = setInterval(function () {
+              if (Date.now() > until) { clearInterval(skipTimer); skipTimer = null; return; }
+              try { autoPickRoute(); clickCoverButtons(); } catch (e) {}
+            }, 150);
+          }
+          try { startCoverSkip(); } catch (e) {}
         })();
         """;
 
+
+    /** 框架接口静态引用（onModuleLoaded 捕获；AutoCheckin 等静态工具借它走现代日志）。 */
+    private static volatile XposedInterface sApi;
+
+    /** 进程名（onModuleLoaded 记录；用于主进程判断）。 */
+    private static volatile String sProcessName = "";
+
+    /** hook 稳定 id（API 102 setId）：热重载时新代按 id 把旧 handle 无缝换成新 hooker */
+    private static final String H_SIR_WEBVIEW = "jm.sir.webview";   // afterIntercept(1)
+    private static final String H_SIR_SW        = "jm.sir.sw";      // afterIntercept(0)
+    private static final String H_PAGE          = "jm.page";        // pageHooker
+    private static final String H_ATTACH        = "jm.attach";      // Application.attach
+
+    /** 统一日志：XposedInterface.log（现代 API 没有 XposedBridge）。 */
+    static void log(String msg) {
+        XposedInterface api = sApi;
+        if (api != null) {
+            api.log(Log.INFO, TAG, msg);
+        }
+    }
+
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
-        // ① 过滤：handleLoadPackage 对设备上每个 App 都会触发
-        if (!TARGET_PKG.equals(lpparam.packageName)) {
+    public void onModuleLoaded(ModuleLoadedParam param) {
+        sApi = this;
+        sProcessName = param.getProcessName();
+    }
+
+    /**
+     * 热重载请求到来（模块更新 autoHotReload / 服务触发）。跑在<旧>代码里：
+     * 先停模块自有的后台线程（API 102 契约——返回 true 前必须让旧代线程退场，
+     * 否则旧 classloader 被新代引用吊住，native/DexKit 状态也悬）。
+     * 停机是有界的：AutoCheckin 线程只在 sleep/尝试边界等待，HTTP 自带 15s 超时。
+     */
+    @Override
+    public boolean onHotReloading(HotReloadingParam param) {
+        Thread t = AutoCheckin.stopForHotReload();
+        if (t != null) {
+            try {
+                // 有界等待：线程只在 sleep 边界（interrupt 秒回）或一次 HTTP 往返（自带超时）后退场
+                t.join(20000L);
+            } catch (InterruptedException ignore) {
+            }
+            if (t.isAlive()) {
+                log(TAG + " 热重载：签到线程 20s 未退场（阻塞在 HTTP），仍放行重载；"
+                        + "纯 Java 线程无 JNI/native 风险，旧代随线程结束自然回收");
+            }
+        }
+        return true;
+    }
+
+    /**
+     * 热重载完成，跑在<新>代码里。包生命周期回调不会重放，所以这里把旧 hook
+     * 逐个 replaceHook 成新 hooker（原子替换，链快照式切换，中间零空窗）。
+     * 注意：本代不会收到 onModuleLoaded，静态引用在这里补种。
+     * 已知边界：Application.attach 已跑过，热重载当次不重排自动签到（ prefs 有 run_date，
+     * 下次冷启动照常）；这是刻意取舍，见 README。
+     */
+    @Override
+    public void onHotReloaded(HotReloadedParam param) {
+        sApi = this;
+        sProcessName = param.getProcessName();
+        int replaced = 0, dropped = 0;
+        for (XposedInterface.HookHandle h : param.getOldHookHandles()) {
+            XposedInterface.Hooker k = hookerForId(h.getId());
+            if (k == null) {
+                h.unhook();   // 不认识 / 无 id 的旧 hook：宁可卸掉也不留旧代代码在链上
+                dropped++;
+                continue;
+            }
+            try {
+                h.replaceHook(k);
+                replaced++;
+            } catch (Throwable t) {
+                log(TAG + " 热重载替换失败（已卸旧 hook）: " + t);
+                try {
+                    h.unhook();
+                } catch (Throwable ignore) {
+                }
+                dropped++;
+            }
+        }
+        log(TAG + " 热重载完成: 替换 " + replaced + " 个 hook, 卸载 " + dropped + " 个"
+                + " (process=" + sProcessName + ")");
+    }
+
+    /** 按 hook id 重建本代的等价 hooker；id 不认识的返回 null。 */
+    private XposedInterface.Hooker hookerForId(String id) {
+        if (id == null) {
+            return null;
+        }
+        switch (id) {
+            case H_SIR_WEBVIEW:
+                return afterIntercept(1);
+            case H_SIR_SW:
+                return afterIntercept(0);
+            case H_PAGE:
+                return pageHooker();
+            case H_ATTACH:
+                return attachHooker();
+            default:
+                return null;
+        }
+    }
+
+    /** Application.attach 的 after hooker：宿主拿到 Context 时调度自动签到。 */
+    private XposedInterface.Hooker attachHooker() {
+        return chain -> {
+            Object original = chain.proceed();
+            try {
+                AutoCheckin.schedule((android.content.Context) chain.getArg(0));
+            } catch (Throwable t) {
+                log(TAG + " 自动签到调度失败: " + t);
+            }
+            return original;
+        };
+    }
+
+    @Override
+    public void onPackageReady(PackageReadyParam param) {
+        // ① 过滤：只处理目标 App（回调对作用域内每个包都触发）
+        if (!TARGET_PKG.equals(param.getPackageName())) {
             return;
         }
+        final ClassLoader loader = param.getClassLoader();
+        final ApplicationInfo appInfo = param.getApplicationInfo();
 
         // ② 自检日志：logcat 出现这行 = 模块加载成功
-        XposedBridge.log(TAG + " 已加载进 " + lpparam.packageName
-                + " (process=" + lpparam.processName + ")");
+        log(TAG + " 已加载进 " + param.getPackageName() + " (process=" + sProcessName + ")");
 
         // ③ 网络层 A：Capacitor WebViewClient.shouldInterceptRequest(WebView, WebResourceRequest)
+        //    after 语义 = proceed() 后命中广告才覆盖返回值
         try {
-            XposedHelpers.findAndHookMethod("com.getcapacitor.q", lpparam.classLoader,
-                    "shouldInterceptRequest", WebView.class, WebResourceRequest.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            handleIntercept(param, (WebResourceRequest) param.args[1]);
-                        }
-                    });
-            XposedBridge.log(TAG + " 已 Hook com.getcapacitor.q.shouldInterceptRequest");
+            Method m = Class.forName("com.getcapacitor.q", false, loader)
+                    .getDeclaredMethod("shouldInterceptRequest", WebView.class, WebResourceRequest.class);
+            hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .setId(H_SIR_WEBVIEW).intercept(afterIntercept(1));
+            log(TAG + " 已 Hook com.getcapacitor.q.shouldInterceptRequest");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " Hook q.shouldInterceptRequest 失败，转 DexKit 定位: " + t);
+            log(TAG + " Hook q.shouldInterceptRequest 失败，转 DexKit 定位: " + t);
             try {
-                Class<?> wc = dexKitFindClass(lpparam, "android.webkit.WebViewClient",
+                Class<?> wc = dexKitFindClass(loader, appInfo.sourceDir, "android.webkit.WebViewClient",
                         "shouldInterceptRequest",
                         "android.webkit.WebView", "android.webkit.WebResourceRequest");
                 if (wc != null) {
-                    XposedHelpers.findAndHookMethod(wc, "shouldInterceptRequest",
-                            WebView.class, WebResourceRequest.class,
-                            new XC_MethodHook() {
-                                @Override
-                                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                    handleIntercept(param, (WebResourceRequest) param.args[1]);
-                                }
-                            });
-                    XposedBridge.log(TAG + " DexKit 兜底已 Hook " + wc.getName()
-                            + ".shouldInterceptRequest");
+                    Method m = wc.getDeclaredMethod("shouldInterceptRequest",
+                            WebView.class, WebResourceRequest.class);
+                    hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .setId(H_SIR_WEBVIEW).intercept(afterIntercept(1));
+                    log(TAG + " DexKit 兜底已 Hook " + wc.getName() + ".shouldInterceptRequest");
                 } else {
-                    XposedBridge.log(TAG + " DexKit 未找到 WebViewClient 子类，网络层 A 失效");
+                    log(TAG + " DexKit 未找到 WebViewClient 子类，网络层 A 失效");
                 }
             } catch (Throwable t2) {
-                XposedBridge.log(TAG + " DexKit 网络层 A 兜底失败: " + t2);
+                log(TAG + " DexKit 网络层 A 兜底失败: " + t2);
             }
         }
 
@@ -189,108 +390,87 @@ public class MainHook implements IXposedHookLoadPackage {
         //    jadx 因 Windows 大小写不敏感文件系统把 com.getcapacitor.d 改名为 C0099d，
         //    dex 里的真实类名是 com.getcapacitor.d（见 jadx_out/sources/com/getcapacitor/C0099d.java 头注释）。
         try {
-            XposedHelpers.findAndHookMethod("com.getcapacitor.d", lpparam.classLoader,
-                    "shouldInterceptRequest", WebResourceRequest.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            handleIntercept(param, (WebResourceRequest) param.args[0]);
-                        }
-                    });
-            XposedBridge.log(TAG + " 已 Hook com.getcapacitor.d.shouldInterceptRequest (ServiceWorker)");
+            Method m = Class.forName("com.getcapacitor.d", false, loader)
+                    .getDeclaredMethod("shouldInterceptRequest", WebResourceRequest.class);
+            hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                    .setId(H_SIR_SW).intercept(afterIntercept(0));
+            log(TAG + " 已 Hook com.getcapacitor.d.shouldInterceptRequest (ServiceWorker)");
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " Hook d.shouldInterceptRequest 失败，转 DexKit 定位: " + t);
+            log(TAG + " Hook d.shouldInterceptRequest 失败，转 DexKit 定位: " + t);
             try {
-                Class<?> sc = dexKitFindClass(lpparam, "android.webkit.ServiceWorkerClient",
+                Class<?> sc = dexKitFindClass(loader, appInfo.sourceDir, "android.webkit.ServiceWorkerClient",
                         "shouldInterceptRequest", "android.webkit.WebResourceRequest");
                 if (sc != null) {
-                    XposedHelpers.findAndHookMethod(sc, "shouldInterceptRequest",
-                            WebResourceRequest.class,
-                            new XC_MethodHook() {
-                                @Override
-                                protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                    handleIntercept(param, (WebResourceRequest) param.args[0]);
-                                }
-                            });
-                    XposedBridge.log(TAG + " DexKit 兜底已 Hook " + sc.getName()
-                            + ".shouldInterceptRequest (ServiceWorker)");
+                    Method m = sc.getDeclaredMethod("shouldInterceptRequest", WebResourceRequest.class);
+                    hook(m).setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                            .setId(H_SIR_SW).intercept(afterIntercept(0));
+                    log(TAG + " DexKit 兜底已 Hook " + sc.getName() + ".shouldInterceptRequest (ServiceWorker)");
                 } else {
-                    XposedBridge.log(TAG + " DexKit 未找到 ServiceWorkerClient 子类，网络层 B 失效");
+                    log(TAG + " DexKit 未找到 ServiceWorkerClient 子类，网络层 B 失效");
                 }
             } catch (Throwable t2) {
-                XposedBridge.log(TAG + " DexKit 网络层 B 兜底失败: " + t2);
+                log(TAG + " DexKit 网络层 B 兜底失败: " + t2);
             }
         }
 
         // ⑤ 页面层：注入 JS 补丁。q 显式覆写了 onPageStarted/onPageFinished，直接 Hook 它们。
         try {
-            XposedHelpers.findAndHookMethod("com.getcapacitor.q", lpparam.classLoader,
-                    "onPageStarted", WebView.class, String.class, Bitmap.class, pageHook());
-            XposedHelpers.findAndHookMethod("com.getcapacitor.q", lpparam.classLoader,
-                    "onPageFinished", WebView.class, String.class, pageHook());
-            XposedBridge.log(TAG + " 已 Hook q.onPageStarted/onPageFinished（JS 注入）");
+            Class<?> q = Class.forName("com.getcapacitor.q", false, loader);
+            hook(q.getDeclaredMethod("onPageStarted", WebView.class, String.class, Bitmap.class))
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId(H_PAGE).intercept(pageHooker());
+            hook(q.getDeclaredMethod("onPageFinished", WebView.class, String.class))
+                    .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId(H_PAGE).intercept(pageHooker());
+            log(TAG + " 已 Hook q.onPageStarted/onPageFinished（JS 注入）");
         } catch (Throwable t) {
             // ⑥ 兜底一：DexKit 按结构签名重新定位页面方法所在类
-            XposedBridge.log(TAG + " Hook q 页面方法失败，转 DexKit 定位: " + t);
+            log(TAG + " Hook q 页面方法失败，转 DexKit 定位: " + t);
             boolean dexkitPageOk = false;
             try {
-                Class<?> pc = dexKitFindClass(lpparam, "android.webkit.WebViewClient",
+                Class<?> pc = dexKitFindClass(loader, appInfo.sourceDir, "android.webkit.WebViewClient",
                         "onPageStarted", "android.webkit.WebView", "java.lang.String",
                         "android.graphics.Bitmap");
                 if (pc != null) {
-                    XposedHelpers.findAndHookMethod(pc, "onPageStarted",
-                            WebView.class, String.class, Bitmap.class, pageHook());
-                    XposedHelpers.findAndHookMethod(pc, "onPageFinished",
-                            WebView.class, String.class, pageHook());
+                    hook(pc.getDeclaredMethod("onPageStarted", WebView.class, String.class, Bitmap.class))
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId(H_PAGE).intercept(pageHooker());
+                    hook(pc.getDeclaredMethod("onPageFinished", WebView.class, String.class))
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId(H_PAGE).intercept(pageHooker());
                     dexkitPageOk = true;
-                    XposedBridge.log(TAG + " DexKit 兜底已 Hook " + pc.getName()
-                            + ".onPageStarted/onPageFinished（JS 注入）");
+                    log(TAG + " DexKit 兜底已 Hook " + pc.getName() + ".onPageStarted/onPageFinished（JS 注入）");
                 }
             } catch (Throwable t2) {
-                XposedBridge.log(TAG + " DexKit 页面层兜底失败: " + t2);
+                log(TAG + " DexKit 页面层兜底失败: " + t2);
             }
-            if (dexkitPageOk) {
-                scheduleAutoCheckin(lpparam);
-                return;
-            }
-            // ⑦ 兜底二：框架级 Hook（q 的实现里调用了 super，仍会触发；JS 幂等）
-            try {
-                XposedHelpers.findAndHookMethod(WebViewClient.class, "onPageStarted",
-                        WebView.class, String.class, Bitmap.class, pageHook());
-                XposedHelpers.findAndHookMethod(WebViewClient.class, "onPageFinished",
-                        WebView.class, String.class, pageHook());
-                XposedBridge.log(TAG + " 已 Hook WebViewClient 框架级页面注入（兜底）");
-            } catch (Throwable t2) {
-                XposedBridge.log(TAG + " 框架级页面注入也失败: " + t2);
+            if (!dexkitPageOk) {
+                // ⑦ 兜底二：框架级 Hook（q 的实现里调用了 super，仍会触发；JS 幂等）
+                try {
+                    hook(WebViewClient.class.getDeclaredMethod("onPageStarted",
+                            WebView.class, String.class, Bitmap.class))
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId(H_PAGE).intercept(pageHooker());
+                    hook(WebViewClient.class.getDeclaredMethod("onPageFinished",
+                            WebView.class, String.class))
+                            .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE).setId(H_PAGE).intercept(pageHooker());
+                    log(TAG + " 已 Hook WebViewClient 框架级页面注入（兜底）");
+                } catch (Throwable t2) {
+                    log(TAG + " 框架级页面注入也失败: " + t2);
+                }
             }
         }
 
         // ⑧ 自动领取官方免费 JCoin（每日首次启动宿主执行一次）：签到 + 补签 + 全勤奖励。
         //    需要宿主 Context 才能读 localStorage 凭据并联网，故挂在 Application.attach；
         //    只在主进程挂（leveldb 由 UI 进程持有）。全部 try-catch，失败不影响去广告/繁简。
-        if (lpparam.packageName.equals(lpparam.processName)) {
+        if (TARGET_PKG.equals(sProcessName)) {
             try {
-                XposedHelpers.findAndHookMethod(android.app.Application.class, "attach", android.content.Context.class,
-                        new XC_MethodHook() {
-                            @Override
-                            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                                try {
-                                    AutoCheckin.schedule((android.content.Context) param.args[0]);
-                                } catch (Throwable t) {
-                                    XposedBridge.log(TAG + " 自动签到调度失败: " + t);
-                                }
-                            }
-                        });
-                XposedBridge.log(TAG + " 已挂 Application.attach（自动签到调度）");
+                hook(android.app.Application.class.getDeclaredMethod(
+                        "attach", android.content.Context.class))
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .setId(H_ATTACH)
+                        .intercept(attachHooker());
+                log(TAG + " 已挂 Application.attach（自动签到调度）");
             } catch (Throwable t) {
-                XposedBridge.log(TAG + " 自动签到 hook 失败: " + t);
+                log(TAG + " 自动签到 hook 失败: " + t);
             }
         }
-    }
-
-    /** 自动签到入口（单独方法便于 try-catch 与日后开关）。 */
-    private static void scheduleAutoCheckin(XC_LoadPackage.LoadPackageParam lpparam) {
-        // 实际调度在 ⑧ 的 Application.attach 里（需要 Context），此处仅留日志锚点
     }
 
     /** libdexkit.so 是否已加载（每进程一次；只在硬编码类名失效的兜底路径才加载）。 */
@@ -302,7 +482,7 @@ public class MainHook implements IXposedHookLoadPackage {
      * 参数用点分全名（如 android.webkit.WebView），与 DexKit MethodMatcher 约定一致。
      * 正常启动走不到这里，so 加载与全量扫描只发生在失败路径。
      */
-    private static Class<?> dexKitFindClass(XC_LoadPackage.LoadPackageParam lpparam,
+    private static Class<?> dexKitFindClass(ClassLoader loader, String sourceDir,
             String superCls, String method, String... paramTypes) {
         try {
             if (!sDexKitLoaded) {
@@ -310,17 +490,17 @@ public class MainHook implements IXposedHookLoadPackage {
                 sDexKitLoaded = true;
             }
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " DexKit so 加载失败: " + t);
+            log(TAG + " DexKit so 加载失败: " + t);
             return null;
         }
         String best = null;
-        try (DexKitBridge bridge = DexKitBridge.create(lpparam.appInfo.sourceDir)) {
+        try (DexKitBridge bridge = DexKitBridge.create(sourceDir)) {
             MethodDataList list = bridge.findMethod(FindMethod.create()
                     .matcher(MethodMatcher.create().name(method).paramTypes(paramTypes)));
             for (MethodData md : list) {
                 Class<?> c;
                 try {
-                    c = md.getClassInstance(lpparam.classLoader);
+                    c = md.getClassInstance(loader);
                 } catch (Throwable ignore) {
                     continue;
                 }
@@ -340,22 +520,23 @@ public class MainHook implements IXposedHookLoadPackage {
                 }
             }
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " DexKit 搜索失败: " + t);
+            log(TAG + " DexKit 搜索失败: " + t);
             return null;
         }
         if (best == null) {
-            XposedBridge.log(TAG + " DexKit 未找到继承 " + superCls + " 的 " + method + " 方法");
+            log(TAG + " DexKit 未找到继承 " + superCls + " 的 " + method + " 方法");
             return null;
         }
         try {
-            Class<?> c = Class.forName(best, false, lpparam.classLoader);
-            XposedBridge.log(TAG + " DexKit 定位 " + best + "（继承 " + superCls + "）");
+            Class<?> c = Class.forName(best, false, loader);
+            log(TAG + " DexKit 定位 " + best + "（继承 " + superCls + "）");
             return c;
         } catch (Throwable t) {
-            XposedBridge.log(TAG + " DexKit 类加载失败 " + best + ": " + t);
+            log(TAG + " DexKit 类加载失败 " + best + ": " + t);
             return null;
         }
     }
+
 
     /** 繁→简转换脚本（assets/t2s.js 的 base64 内嵌副本）解码缓存；每个进程只解一次。 */
     private static volatile String sT2sJs;
@@ -383,56 +564,61 @@ public class MainHook implements IXposedHookLoadPackage {
                 byte[] raw = Base64.decode(T2S_B64, 0);
                 sT2sJs = new String(raw, StandardCharsets.UTF_8);
             } catch (Throwable t) {
-                XposedBridge.log(TAG + " 繁→简脚本解码失败: " + t);
+                log(TAG + " 繁→简脚本解码失败: " + t);
             }
-            XposedBridge.log(TAG + " 繁→简转换 " + (sT2sJs != null
+            log(TAG + " 繁→简转换 " + (sT2sJs != null
                     ? "已启用 (" + sT2sJs.length() + " 字符)"
                     : "不可用（内嵌脚本解码失败），仅保留去广告"));
         }
         return sT2sJs;
     }
 
-    /** 页面 Hook：页面提交/结束时把 JS 补丁 evaluate 进主框架（补丁自身幂等，重复执行无害）。 */
-    private XC_MethodHook pageHook() {
-        return new XC_MethodHook() {
-            @Override
-            protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                try {
-                    Object wv = param.args[0];
-                    if (wv instanceof WebView) {
-                        WebView webView = (WebView) wv;
-                        String t2s = t2sScript();
-                        webView.evaluateJavascript(
-                                t2s == null ? JS_PATCH : JS_PATCH + "\n" + t2s, null);
-                    }
-                } catch (Throwable t) {
-                    XposedBridge.log(TAG + " JS 注入失败: " + t);
+    /** 页面 Hooker：页面提交/结束时把 JS 补丁 evaluate 进主框架（补丁自身幂等，重复执行无害）。 */
+    private XposedInterface.Hooker pageHooker() {
+        return chain -> {
+            Object original = chain.proceed();
+            try {
+                Object wv = chain.getArg(0);
+                if (wv instanceof WebView) {
+                    WebView webView = (WebView) wv;
+                    String t2sJs = t2sScript();
+                    webView.evaluateJavascript(
+                            t2sJs == null ? JS_PATCH : JS_PATCH + "\n" + t2sJs, null);
                 }
+            } catch (Throwable t) {
+                log(TAG + " JS 注入失败: " + t);
             }
+            return original;
         };
     }
 
     /**
      * after-hook：命中广告端点即用伪造响应覆盖返回值（无论原结果是否为 null）。
-     * 只按“路径最后一段”精确匹配，绝不会误伤本地静态资源。
+     * argIndex：WebResourceRequest 在参数中的下标（WebViewClient 版=1，ServiceWorkerClient 版=0）。
+     * 只按"路径最后一段"精确匹配，绝不会误伤本地静态资源。
      */
-    private void handleIntercept(XC_MethodHook.MethodHookParam param, WebResourceRequest req) {
-        try {
-            if (req == null) {
-                return;
+    private XposedInterface.Hooker afterIntercept(int argIndex) {
+        return chain -> {
+            Object original = chain.proceed();
+            try {
+                WebResourceRequest req = (WebResourceRequest) chain.getArg(argIndex);
+                if (req == null) {
+                    return original;
+                }
+                String payload = adPayloadFor(req.getUrl());
+                if (payload == null) {
+                    return original;
+                }
+                boolean isOptions = "OPTIONS".equalsIgnoreCase(req.getMethod());
+                log(TAG + " 拦截广告请求 " + req.getMethod() + " " + req.getUrl()
+                        + (isOptions ? " (CORS 预检)" : " -> " + payload));
+                return buildResponse(req, payload, isOptions);
+            } catch (Throwable t) {
+                // Hook 回调必须 try-catch：抛出去会崩宿主（PROTECTIVE 模式也会兜底，双保险）
+                log(TAG + " 拦截异常: " + t);
+                return original;
             }
-            String payload = adPayloadFor(req.getUrl());
-            if (payload == null) {
-                return;
-            }
-            boolean isOptions = "OPTIONS".equalsIgnoreCase(req.getMethod());
-            param.setResult(buildResponse(req, payload, isOptions));
-            XposedBridge.log(TAG + " 拦截广告请求 " + req.getMethod() + " " + req.getUrl()
-                    + (isOptions ? " (CORS 预检)" : " -> " + payload));
-        } catch (Throwable t) {
-            // Hook 回调必须 try-catch：抛出去会崩宿主
-            XposedBridge.log(TAG + " 拦截异常: " + t);
-        }
+        };
     }
 
     /** 广告 API 路径 → 前端期望的明文载荷；非广告端点返回 null。 */

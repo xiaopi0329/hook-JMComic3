@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <!-- 四件套之②：默认作用域 = 目标 App 包名。改目标时这里必须同步改 -->
-    <string-array name="xposedscope">
-        <item>com.a7m3p9xv.t6qk2z8.app</item>
-    </string-array>
-</resources>

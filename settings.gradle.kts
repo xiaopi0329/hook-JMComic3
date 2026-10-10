@@ -10,8 +10,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // Legacy Xposed API 官方仓库（已实测可用）
-        maven(url = "https://api.xposed.info")
     }
 }
 rootProject.name = "hook-JMComic3"
