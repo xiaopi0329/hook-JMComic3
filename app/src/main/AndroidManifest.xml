@@ -1,14 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- libxposed 现代 API：模块身份不再靠 meta-data，改由 META-INF/xposed/ 声明
-         （java_init.list=入口类, module.prop=API 版本, scope.list=作用域）。
-         名称用 android:label，描述用 android:description。 -->
+    <!-- libxposed 现代 API：模块身份由 META-INF/xposed/ 声明；
+         名称用 android:label，描述用 android:description。
+         设置入口：LSPosed/LSPatch 管理器按 category MODULE_SETTINGS 找 Activity。 -->
     <application
         android:label="@string/app_name"
         android:description="@string/xposed_description"
         android:allowBackup="false"
         android:supportsRtl="true">
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+            </intent-filter>
+        </activity>
     </application>
 
 </manifest>

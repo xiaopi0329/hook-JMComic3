@@ -8,10 +8,11 @@ LSPosed 模块：给 **JMComic3**（`com.a7m3p9xv.t6qk2z8.app`，v2.1.11，Capac
 | 模块名 | `hook-JMComic3` |
 | 包名 | `com.jmcomic.hook` |
 | 入口类 | `com.jmcomic.hook.MainHook` |
-| 版本 | `1.2.3`（versionCode 6）· libxposed API 102 + 热重载 |
+| 版本 | `1.3.0`（versionCode 7）· libxposed API 102 + 热重载 + Kotlin + 设置面板 |
 | 目标宿主 | `com.a7m3p9xv.t6qk2z8.app` |
 | minSdk / targetSdk | 27 / 35 |
 | API | libxposed 现代 API **102**（min=target=102），入口 `XposedModule` + `META-INF/xposed/` 声明；开启**热重载**（`autoHotReload=true`）|
+| 语言 | **Kotlin**（模块主体）+ JS（注入补丁）；设置面板经 libxposed service |
 | 依赖 | `io.github.libxposed:api:102.0.0`（`compileOnly`）、DexKit 2.3.0（`implementation`） |
 
 ## 功能
@@ -102,7 +103,21 @@ ThreeCover 点`我已年滿18歲` → 可能还有 FourCover 点 X）。模块�
 - **真机实测**（2026-10-08）：首次启动自动补签 5 天，服务端进度 14.3% → 28.6%，
   已签日期 08 → 01,02,03,05,07,08；同日第二次启动正确跳过（`今日已执行过`）。
 
-### 4. 热重载（API 102）
+### 4. 设置面板（宿主面板）
+
+模块 App 自带设置界面（"宿主面板"）：LSPosed/LSPatch 管理器点模块条目"设置"打开
+（manifest activity 带 " + BQ + "de.robv.android.xposed.category.MODULE_SETTINGS" + BQ + "）。
+
+- 5 个开关：去广告 / 繁简转换 / 自动签到 / 自动补签 / 自动跳开屏——经 libxposed
+  RemotePreferences（" + BQ + "Config.kt" + BQ + " GROUP=" + BQ + "jm_settings" + BQ + "）实时下发，改完强开宿主即生效。
+- 面板进程写入走 XposedService；**宿主进程读取走 XposedInterface.getRemotePreferences**（框架内置通道）。
+  注意：LSPatch manager 模式下框架不向宿主投递 service binder（LSPApplication 仅 !useManager 时投递），
+  宿主必须用内置通道——这正是 Config.kt 的读取路径。
+- **已知边界（真机实测）**：LSPatch 的 RemotePreferences 存于 manager 进程内存，不落盘——
+  manager 进程重启后设置回到默认（全部开启）。LSPosed root 模式无此问题。
+- 读不到设置（老框架/异常）时全部默认开，与无开关版本行为一致，绝不因读不到而关功能。
+
+### 5. 热重载（API 102）
 
 `module.prop` 设 `autoHotReload=true`：在 LSPosed 里更新模块 APK 后**目标 App 无需强停重开**，
 框架自动把模块换代（也可经 libxposed service 手动触发）。
@@ -116,7 +131,7 @@ ThreeCover 点`我已年滿18歲` → 可能还有 FourCover 点 X）。模块�
   下次冷启动照常；若签到线程正阻塞在一次 HTTP 往返（自带 15s 超时）而 20s 未退场，仍放行重载并记日志
   —— 纯 Java 线程无 JNI/native 悬挂风险，旧代随线程结束自然回收。
 
-### 5. DexKit 兜底
+### 6. DexKit 兜底
 
 硬编码类名 `com.getcapacitor.q/d`（2.1.11 反混淆结果）失效时，按结构签名在宿主 dex 里重新定位：
 继承 `WebViewClient`/`ServiceWorkerClient` + 方法签名，多候选取类名最短者（R8 短名特征）。
@@ -137,6 +152,8 @@ JCoin 是服务端权威：`memberInfo.coin` 只是 UI 显示值，三笔消耗�
 > ⚠️ **框架要求**：libxposed API 需要 LSPosed **v1.9.0+**（现代 API 支持）；本模块 `minApiVersion=102`，
 > 需框架支持 API 102（热重载 / `setId` / `replaceHook`，对应 LSPosed v2.x 代），旧框架会直接判模块不兼容。
 > 老版 LSPosed / EdXposed / Tai chi 不认本模块，装上也只会静默不生效。
+
+> Kotlin 迁移后首次构建需联网下 Kotlin 插件（腾讯镜像已配 gradle wrapper）。
 
 **命令行**：
 ```powershell
@@ -197,14 +214,17 @@ adb logcat | findstr /i hook-JMComic3
 
 | 文件 | 作用 |
 |---|---|
-| `settings.gradle.kts` | 仓库声明：google / mavenCentral（libxposed API 在 mavenCentral，legacy `api.xposed.info` 仓库已移除）|
+| `settings.gradle.kts` | 仓库声明：google / mavenCentral |
+| `build.gradle.kts` | AGP 8.13.2 + Kotlin 2.0.21（compileSdk 37——libxposed service AAR 硬要求 ≥37；targetSdk 35/minSdk 27 不变）|
 | `app/build.gradle.kts` | Xposed API `compileOnly`、DexKit `implementation`、`useLegacyPackaging`、`buildConfig`、包名、`versionCode` |
 | `app/src/main/AndroidManifest.xml` | `android:label`/`android:description` = 模块名与描述（现代 API 不再用 meta-data）|
 | `app/src/main/resources/META-INF/xposed/java_init.list` | Java 入口类全名（替代 `assets/xposed_init`）|
 | `app/src/main/resources/META-INF/xposed/module.prop` | `minApiVersion=102` / `targetApiVersion=102` / `autoHotReload=true` |
 | `app/src/main/resources/META-INF/xposed/scope.list` | 默认作用域（目标 App 包名，一行一个）|
-| `app/src/main/java/com/jmcomic/hook/MainHook.java` | Hook 入口 `extends XposedModule`（去广告 + JS 注入 + DexKit 兜底）|
-| `app/src/main/java/com/jmcomic/hook/AutoCheckin.java` | 每日自动签到执行器 |
+| `app/src/main/java/com/jmcomic/hook/MainHook.kt` | Hook 入口 `: XposedModule()`（去广告 + JS 注入 + DexKit 兜底 + 热重载）|
+| `app/src/main/java/com/jmcomic/hook/AutoCheckin.kt` | 每日自动签到执行器（object）|
+| `app/src/main/java/com/jmcomic/hook/Config.kt` | 设置桥：宿主经 XposedInterface.getRemotePreferences 读开关 |
+| `app/src/main/java/com/jmcomic/hook/SettingsActivity.kt` | 设置面板（管理器 MODULE_SETTINGS 入口，纯代码布局）|
 | `app/src/main/assets/t2s.js` | 繁→简转换表 + DOM 观察器（同时 base64 内嵌进 `T2S_B64`）|
 | `app/proguard-rules.pro` | 开混淆时 keep 入口类与 DexKit |
 
