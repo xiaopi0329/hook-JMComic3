@@ -13,15 +13,30 @@ android {
         minSdk = 27          // LSPosed 最低支持 Android 8.1 = API 27
         targetSdk = 35
         // 模块每次发布必须 versionCode+1：DexKit“模块更新”触发器靠它感知更新
-        versionCode = 7
-        versionName = "1.3.0"
+        versionCode = 8
+        versionName = "1.4.0"
+    }
+
+    signingConfigs {
+        create("xiaopi") {
+            // 工作区统一签名（与 /d/工作区/XposedDemo 同一把）；个人项目密码就地放，公开项目挪 gradle.properties
+            storeFile = file("D:/工作区/apk签名/xiaopi key.jks")
+            storePassword = "xiaopi520"
+            keyAlias = "xiaopikey"
+            keyPassword = "xiaopi520"
+        }
     }
 
     buildTypes {
+        debug {
+            // 发布走 assembleDebug，所以 debug 也用同一签名：否则换签名后 adb install -r 覆盖安装会失败
+            signingConfig = signingConfigs.getByName("xiaopi")
+        }
         release {
             // 初学阶段保持关闭；功能跑通要发布时再开，开则必须配 proguard-rules.pro
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("xiaopi")
         }
     }
 

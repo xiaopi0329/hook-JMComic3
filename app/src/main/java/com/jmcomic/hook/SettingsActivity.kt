@@ -3,6 +3,7 @@ package com.jmcomic.hook
 import android.app.Activity
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.Gravity
@@ -24,6 +25,7 @@ import java.util.Locale
  * 开关经 libxposed RemotePreferences 写入框架数据库，宿主进程侧 Config 实时读取。
  *
  * 纯代码布局（无 XML/res 依赖）：这个模块 APK 只有这一个界面，写死最省。
+ * 排版：深色底 + 圆角卡片分组（说明 / 功能开关 / 签到），开关右对齐、行内分隔线缩进。
  * 面板进程拿不到 service（框架不支持/未送达）时禁用全部开关并提示，绝不假装可改。
  */
 class SettingsActivity : Activity() {
@@ -38,84 +40,83 @@ class SettingsActivity : Activity() {
         Row(Config.K_AUTO_CHECKIN, "每日自动签到", "官方免费接口：签到 + 全勤（每日首次启动宿主执行）"),
         Row(Config.K_AUTO_MAKEUP, "自动补签", "消耗官方每月补签额度（默认上限 5 次/月）"),
         Row(Config.K_AUTO_SKIP, "自动跳开屏", "选线页自动选线 + 自动点年龄确认/X，直达正文"),
+        Row(Config.K_BOTTOM_GLASS, "iOS 液态玻璃底栏", "底栏改半透明毛玻璃（需开启去广告）"),
+        Row(Config.K_TAB_SIMPLE, "精简底栏", "只保留 首页/分类/小电影/个人中心（需开启去广告）"),
+        Row(Config.K_LOCK_BADGE, "未解锁标签", "需 Jcoin 解锁的漫画在封面上打「未解锁」角标"),
     )
+
+    // ---------------------------------------------------------------- 调色板
+    private val cBg = 0xFF0E1116.toInt()        // 页面底
+    private val cCard = 0xFF171D26.toInt()      // 卡片底
+    private val cLine = 0xFF242C38.toInt()      // 行分隔线
+    private val cTitle = 0xFFF2F5F8.toInt()     // 行标题
+    private val cDesc = 0xFF8A939E.toInt()      // 行描述 / 说明
+    private val cSection = 0xFF6E7884.toInt()   // 分组小标题
+    private val cAccent = 0xFF2D6CDF.toInt()    // 按钮底
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "hook-JMComic3 设置"
 
-        val pad = dp(16)
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(pad, pad, pad, pad)
+            setPadding(dp(12), dp(8), dp(12), dp(20))
         }
         setContentView(ScrollView(this).apply {
             addView(root)
-            setBackgroundColor(0xFF101418.toInt())
         })
+        window.decorView.setBackgroundColor(cBg)
 
-        root.addView(TextView(this).apply {
-            text = "开关写入 LSPosed 框架数据库，宿主进程实时读取；" +
-                    "改动对已加载页面下次注入时生效。"
-            setTextColor(0xFF9AA4AF.toInt())
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setPadding(0, 0, 0, dp(12))
-        })
+        // ── 说明卡 ───────────────────────────────────────────────────────
+        root.addView(sectionLabel("说明"))
+        root.addView(card().apply {
+            addView(TextView(this@SettingsActivity).apply {
+                text = "开关写入 LSPosed 框架数据库，宿主进程实时读取；" +
+                        "改动对已加载页面下次注入时生效。"
+                setTextColor(cDesc)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setLineSpacing(dp(2).toFloat(), 1f)
+            })
+        }, cardLp())
 
-        for (row in rows) {
-            val line = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setPadding(dp(4), dp(10), dp(4), dp(10))
-            }
-            line.addView(TextView(this).apply {
-                text = row.title
-                setTextColor(Color.WHITE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                setTypeface(typeface, Typeface.BOLD)
-            })
-            line.addView(TextView(this).apply {
-                text = row.desc
-                setTextColor(0xFF8A939E.toInt())
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            })
-            val sw = Switch(this).apply {
-                id = View.generateViewId()
-                isChecked = true
-                isEnabled = false
-                setOnCheckedChangeListener { _, checked -> save(row.key, checked) }
-            }
-            val wrap = LinearLayout(this).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(line, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-                addView(sw)
-            }
-            root.addView(wrap)
-            root.addView(View(this).apply {
-                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
-                    topMargin = dp(4)
-                }
-                setBackgroundColor(0xFF2A303A.toInt())
-            })
-            switches[row.key] = sw
+        // ── 功能开关卡 ───────────────────────────────────────────────────
+        root.addView(sectionLabel("功能开关"))
+        val settingsCard = card()
+        rows.forEachIndexed { i, row ->
+            if (i > 0) settingsCard.addView(insetDivider())
+            settingsCard.addView(switchRow(row))
         }
+        root.addView(settingsCard, cardLp())
 
-        root.addView(Button(this).apply {
+        // ── 签到卡 ───────────────────────────────────────────────────────
+        root.addView(sectionLabel("签到"))
+        val checkinCard = card()
+        checkinCard.addView(Button(this).apply {
             text = "立即执行一次签到检查"
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            background = GradientDrawable().apply {
+                setColor(cAccent)
+                cornerRadius = dp(10).toFloat()
+            }
             setOnClickListener {
                 Toast.makeText(this@SettingsActivity,
                     "签到在宿主启动时自动执行（每日一次）；想立刻跑：强开一次 JMComic3",
                     Toast.LENGTH_LONG).show()
             }
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)).apply {
+            setMargins(dp(12), dp(12), dp(12), 0)
         })
 
         val status = TextView(this).apply {
             text = "正在连接 LSPosed 框架…"
-            setTextColor(0xFF9AA4AF.toInt())
+            setTextColor(cDesc)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, dp(10), 0, 0)
+            setPadding(dp(12), dp(10), dp(12), dp(4))
         }
-        root.addView(status)
+        checkinCard.addView(status)
+        root.addView(checkinCard, cardLp())
         this.status = status
 
         // 连接框架 service（libxposed 101+）
@@ -137,6 +138,80 @@ class SettingsActivity : Activity() {
         } catch (t: Throwable) {
             status.text = "libxposed service 不可用: " + t
         }
+    }
+
+    // ---------------------------------------------------------------- 开关行
+
+    /**
+     * 一行开关：左侧标题+描述（weight=1），右侧 Switch 垂直居中。
+     * Switch 登记进 switches 供 bindUi/rowSwitches 使用（与旧版一致）。
+     */
+    private fun switchRow(row: Row): View {
+        val textCol = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        textCol.addView(TextView(this).apply {
+            text = row.title
+            setTextColor(cTitle)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTypeface(typeface, Typeface.BOLD)
+        })
+        textCol.addView(TextView(this).apply {
+            text = row.desc
+            setTextColor(cDesc)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setLineSpacing(dp(1).toFloat(), 1f)
+            setPadding(0, dp(2), 0, 0)
+        })
+
+        val sw = Switch(this).apply {
+            id = View.generateViewId()
+            isChecked = true
+            isEnabled = false
+            setOnCheckedChangeListener { _, checked -> save(row.key, checked) }
+        }
+        switches[row.key] = sw
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(16), dp(12), dp(12), dp(12))
+            addView(textCol, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            addView(sw)
+        }
+    }
+
+    // ---------------------------------------------------------------- 卡片/杂项
+
+    /** 圆角卡片容器（垂直 LinearLayout）。 */
+    private fun card(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = GradientDrawable().apply {
+            setColor(cCard)
+            cornerRadius = dp(14).toFloat()
+        }
+    }
+
+    /** 分组小标题（卡片上方）。 */
+    private fun sectionLabel(text: String): TextView = TextView(this).apply {
+        this.text = text
+        setTextColor(cSection)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        setTypeface(typeface, Typeface.BOLD)
+        setPadding(dp(6), dp(8), dp(6), dp(4))
+    }
+
+    /** 卡片的默认布局参数（与上方小标题构成一组节奏）。 */
+    private fun cardLp(): LinearLayout.LayoutParams =
+        LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+
+    /** 卡片内行分隔线：左右缩进与行 padding 对齐，避免顶到圆角。 */
+    private fun insetDivider(): View = View(this).apply {
+        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 1).apply {
+            leftMargin = dp(16)
+            rightMargin = dp(48)
+        }
+        setBackgroundColor(cLine)
     }
 
     private val switches = HashMap<String, Switch>()

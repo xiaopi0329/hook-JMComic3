@@ -24,6 +24,9 @@ object Config {
     const val K_AUTO_CHECKIN = "auto_checkin"  // 每日自动签到
     const val K_AUTO_MAKEUP = "auto_makeup"    //   └ 补签（消耗官方每月额度）
     const val K_AUTO_SKIP = "auto_skip"        //   └ 选线页自动选线 + 开屏链自动跳
+    const val K_BOTTOM_GLASS = "bottom_glass"  // iOS 透明液态玻璃底栏
+    const val K_TAB_SIMPLE = "tab_simple"      // 精简底栏（仅 首页/分类/小电影/个人中心）
+    const val K_LOCK_BADGE = "lock_badge"      // 未解锁角标（列表卡片封面）
 
     /** 宿主进程侧：框架接口（onModuleLoaded/onHotReloaded 传入）。 */
     @Volatile
@@ -42,6 +45,9 @@ object Config {
         K_AUTO_CHECKIN to true,
         K_AUTO_MAKEUP to true,
         K_AUTO_SKIP to true,
+        K_BOTTOM_GLASS to true,
+        K_TAB_SIMPLE to true,
+        K_LOCK_BADGE to true,
     )
 
     /** 宿主进程调用；幂等。优先框架内置通道，service 监听作兜底。 */

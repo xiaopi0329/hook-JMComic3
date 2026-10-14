@@ -162,6 +162,10 @@ cd hook-JMComic3
 ```
 产物：`app\build\outputs\apk\debug\app-debug.apk`
 
+> 签名：debug / release 统一用工作区 keystore `D:\工作区\apk签名\xiaopi key.jks`
+> （证书指纹 SHA256 `89:DA:2A:A8:CA:88:B2:3D:9E:12:90:7C:3B:48:7F:38:9A:BD:79:7E:A1:0C:81:83:EB:96:01:65:D6:E5:74:AA`）。
+> 换签名后手机上旧签名的模块装不上，先 `adb uninstall com.jmcomic.hook` 再 `adb install -r`。
+
 > 首次会自动下载 Gradle 8.11.1（`gradle-wrapper.properties` 已配腾讯镜像）。
 > `local.properties` 不入库（已 gitignore），换机器用 Android Studio 打开会自动生成，
 > 或手写 `sdk.dir=<你的 SDK 路径>`。

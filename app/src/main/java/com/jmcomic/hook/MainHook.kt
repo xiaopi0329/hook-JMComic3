@@ -200,13 +200,251 @@ class MainHook : XposedModule() {
               try { autoPickRoute(); clickCoverButtons(); } catch (e) {}
             }, 150);
           }
-          @@SCANNER@@
+          function __jmBoot() {
+          if (window.__jmBooted) return;
+          window.__jmBooted = 1;
+          try { @@SCANNER@@ } catch (e) { window.__jmErr = (window.__jmErr || "") + "|SCANNER:" + e.message; }
+          try { @@GLASS@@ } catch (e) { window.__jmErr = (window.__jmErr || "") + "|GLASS:" + e.message; }
+          try { @@TABS@@ } catch (e) { window.__jmErr = (window.__jmErr || "") + "|TABS:" + e.message; }
+          try { @@GRIDFIX@@ } catch (e) { window.__jmErr = (window.__jmErr || "") + "|GRIDFIX:" + e.message; }
+          try { @@LOCK@@ } catch (e) { window.__jmErr = (window.__jmErr || "") + "|LOCK:" + e.message; }
+          }
+          // onPageStarted 时 <head> 还没建好：document.head.appendChild 会抛错并打断后续块（GLASS 靠定时器侥幸活下来）。
+          if (document.head) { __jmBoot(); }
+          else { document.addEventListener("DOMContentLoaded", __jmBoot, { once: true }); setTimeout(__jmBoot, 500); }
         })();
 """.trimIndent()
+    private val GLASS_JS: String = """
+(function () {
+  // 液态玻璃底栏 v8 —— 纯 CSS 选择器（不再靠 JS 加类）
+  //  根因：SPA 切换路由时 React 重建底栏 DOM，上一版 glassApply() 加的 'jm-glass' 类
+  //  随旧节点一起被丢弃；而扫描定时器 5s 后已 clearInterval、MutationObserver 8s 后 disconnect
+  //  → 切页后底栏失效。改为样式表常驻 + 选择器直接命中宿主类名，任何时刻新建的底栏节点自动套用。
+  //  注意：不要用 MutationObserver 监听 documentElement（曾因自激循环占满主线程 → 白屏）。
+  var SID = 'jm-glass';
+  var BAR = '.fixed.bottom-0.left-0.right-0.w-full.z-30';
+  var INNER = BAR + ' > div';
+  var ITEM = INNER + ' > a';
+
+  function css() {
+    return [
+      // 外层固定容器：居中 + 底部留白 + 透传点击
+      BAR + '{padding:0 6px 6px !important;left:0 !important;right:0 !important;bottom:0 !important;width:100% !important;' +
+      'background:transparent !important;display:flex !important;justify-content:center !important;align-items:flex-end !important;pointer-events:none !important;}',
+      // 玻璃条本体：背景全透明，只留薄模糊 + 描边
+      INNER + '{position:relative !important;display:flex !important;flex-direction:row !important;align-items:center !important;' +
+      'justify-content:center !important;width:fit-content !important;max-width:100% !important;margin:0 !important;pointer-events:auto !important;' +
+      'border-radius:32px !important;padding:6px 8px 8px !important;min-height:0 !important;overflow:hidden !important;' +
+      'background:transparent !important;' +
+      'backdrop-filter:blur(5px) saturate(180%) !important;' +
+      '-webkit-backdrop-filter:blur(5px) saturate(180%) !important;' +
+      'box-shadow:inset 0 0 0 1.5px rgba(255,255,255,0.70),inset 0 1px 0 rgba(255,255,255,0.90),0 0 0 1px rgba(0,0,0,0.12) !important;}',
+      // 上缘折射亮线
+      INNER + '::after{content:"";position:absolute;left:16%;right:16%;top:1px;height:1px;pointer-events:none;z-index:0;' +
+      'background:linear-gradient(90deg,rgba(255,255,255,0) 0%,rgba(255,255,255,0.55) 50%,rgba(255,255,255,0) 100%);}',
+      // tab 项：居中聚拢；选中项内嵌高光胶囊（text-og 加在 <a> 本身，不是子元素）
+      ITEM + '{flex:0 0 auto !important;padding:2px 10px !important;margin:0 6px !important;border-radius:16px !important;position:relative !important;z-index:1 !important;}',
+      ITEM + ' > *{margin:0 !important;}',
+      ITEM + '.text-og{background:rgba(255,255,255,0.10) !important;' +
+      'box-shadow:inset 0 0 0 1px rgba(255,255,255,0.55),inset 0 1px 0 rgba(255,255,255,0.45) !important;}',
+      ITEM + '.text-gy{color:#20283a !important;text-shadow:0 1px 3px rgba(255,255,255,0.55) !important;}',
+      ITEM + '.text-og{color:#e05f22 !important;text-shadow:0 1px 3px rgba(255,255,255,0.5) !important;}',
+      '@media (min-width:520px){' + ITEM + '{margin:0 16px !important;}}',
+      // 暗色模式
+      'html.dark ' + INNER + '{background:transparent !important;' +
+      'box-shadow:inset 0 0 0 1.5px rgba(255,255,255,0.55),inset 0 1px 0 rgba(255,255,255,0.75),0 0 0 1px rgba(0,0,0,0.20) !important;}',
+      'html.dark ' + ITEM + '.text-gy{color:#d7dce6 !important;text-shadow:0 1px 3px rgba(0,0,0,0.5) !important;}'
+    ].join('');
+  }
+
+  function apply() {
+    var st = document.getElementById(SID);
+    if (!st) {
+      st = document.createElement('style');
+      st.id = SID;
+      (document.head || document.documentElement).appendChild(st);
+    }
+    var t = css();
+    if (st.textContent !== t) st.textContent = t;
+  }
+
+  apply();
+  // 常驻幂等重扫：style 节点被宿主清掉时自动补回；不再依赖一次性定时器
+  setInterval(function () { if (!document.getElementById(SID)) apply(); }, 1500);
+})();
+""".trimIndent()
+    private val TAB_JS: String = """
+(function () {
+  // 纯 CSS 选择器隐藏：不逐元素加类（SPA 重渲染会整体重写 className 把类冲掉）。
+  // 样式表常驻，宿主任何时候重建底栏，选择器自动命中新节点。
+  var styleId = 'jm-tab-simple';
+  function ensureStyle() {
+    var st = document.getElementById(styleId);
+    if (!st) {
+      st = document.createElement('style');
+      st.id = styleId;
+      (document.head || document.documentElement).appendChild(st);
+    }
+    st.textContent =
+      '.fixed.bottom-0 a[href*="/games"],.fixed.bottom-0 a[href*="/forum"]{display:none !important;visibility:hidden !important;pointer-events:none !important;}' +
+      // 文字匹配兜底走类：样式常驻
+      '.jm-tab-hide{display:none !important;visibility:hidden !important;pointer-events:none !important}';
+  }
+  function matches(a) {
+    var t = a.textContent || '';
+    return t.indexOf('游戏') >= 0 || t.indexOf('遊戲') >= 0 || t.indexOf('論壇') >= 0 || t.indexOf('论坛') >= 0;
+  }
+  // 文字兜底：底栏内 text 含 游戏/论坛 的 a 补类；常驻低频重扫 + observer，无时间上限
+  function textScan() {
+    var nav = document.querySelector('.fixed.bottom-0');
+    if (!nav) return;
+    var as = nav.querySelectorAll('a');
+    for (var i = 0; i < as.length; i++) {
+      var a = as[i];
+      if (matches(a) && a.className.indexOf('jm-tab-hide') < 0) {
+        a.className = (typeof a.className === 'string' ? a.className : '') + ' jm-tab-hide';
+      }
+    }
+  }
+  ensureStyle();
+  textScan();
+  var tm = setInterval(textScan, 800);
+  try {
+    var mo = new MutationObserver(textScan);
+    mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+  } catch (e) {}
+})();
+""".trimIndent()
+
+    /** ⑦ 列表封面图字对齐 + 每格限制框 + 分辨率自适应（纯 CSS 常驻样式表，幂等）。 */
+    /** ⑦ 列表封面图字对齐 + 每格限制框 + 分辨率自适应（纯 CSS :has()，零延迟、零重排）。 */
+    private val GRIDFIX_JS: String = """
+(function () {
+  // v9：改为纯 CSS（:has() 结构判据），不再靠 __jmCards() 给卡片补类。
+  //  旧版补类发生在 setInterval(2000) 里：SPA 切页后新卡片先按宿主原始尺寸渲染
+  //  （img 带 width/height 属性 = 128x171），0~2s 后才被补上 jm-card → img 变
+  //  width:100%（实测 105px），图片尺寸突变 = 用户看到的「切换页面时元素跳动」。
+  //  纯 CSS 后样式与 DOM 同时生效，没有中间态。
+  //  注意：不要用 MutationObserver 监听 documentElement（曾因自激循环占满主线程 → 白屏）。
+  var SID = 'jm-gridfix';
+  // 卡片两种容器：首页/最新 = div.swiper-slide；分类/搜索/收藏 = .grid.grid-cols-3 > div
+  var CARDS = 'div.swiper-slide:has(> div.relative > a > img),.grid.grid-cols-3 > div:has(> div.relative > a > img)';
+  var COVERS = 'div.swiper-slide > div.relative,.grid.grid-cols-3 > div > div.relative';
+  var IMGS = 'div.swiper-slide > div.relative > a > img,.grid.grid-cols-3 > div > div.relative > a > img';
+  var TITLES = 'div.swiper-slide p.truncate,.grid.grid-cols-3 > div p.truncate';
+  function scope(list, extra) {
+    return list.split(',').map(function (s) { return s + extra; }).join(',');
+  }
+  var CSS =
+    CARDS + '{box-sizing:border-box;overflow:hidden;' +
+      'border:1px solid rgba(0,0,0,.10);border-radius:10px;background:rgba(0,0,0,.015);}' +
+    'html.dark div.swiper-slide:has(> div.relative > a > img),html.dark .grid.grid-cols-3 > div:has(> div.relative > a > img)' +
+      '{border-color:rgba(255,255,255,.12);background:rgba(255,255,255,.03);}' +
+    COVERS + '{width:100%;}' +
+    IMGS + '{width:100% !important;height:auto !important;' +
+      'aspect-ratio:3/4;object-fit:cover;object-position:center top;' +
+      'border-radius:8px;display:block;}' +
+    TITLES + '{font-size:clamp(11px,3.2vw,15px);line-height:1.3;' +
+      'width:100%;box-sizing:border-box;}' +
+    scope(TITLES, '.py-2') + '{padding:4px 2px 2px;}' +
+    scope(TITLES, '.text-gy') + '{opacity:.85;padding:0 2px;}' +
+    '.grid.grid-cols-3{gap:6px;padding:6px;}' +
+    '@media (min-width:420px){.grid.grid-cols-3{gap:8px;padding:8px;}}' +
+    '@media (min-width:640px){.grid.grid-cols-3{gap:12px;padding:12px;}' +
+      CARDS + '{padding:8px;border-radius:12px;}}' +
+    '@media (min-width:900px){.grid.grid-cols-3{gap:16px;padding:16px;}}' +
+    '@media (min-width:1100px){.grid.grid-cols-3{max-width:1080px;margin-left:auto;margin-right:auto;}}';
+  function apply() {
+    var st = document.getElementById(SID);
+    if (!st) {
+      st = document.createElement('style');
+      st.id = SID;
+      (document.head || document.documentElement).appendChild(st);
+    }
+    if (st.textContent !== CSS) { st.textContent = CSS; }
+  }
+  apply();
+  // 样式表挂在 head，SPA 路由切换不会移除；只在丢失时补一次。
+  setInterval(function () { if (!document.getElementById(SID)) { apply(); } }, 2000);
+})();
+""".trimIndent()
+
+    /**
+     * ⑨ 未解锁角标：给需 Jcoin 解锁的漫画卡片封面打「未解锁」。
+     *
+     * 判据来源（离线全量采样，见 _scan_rows2.json）：
+     *   站点把「需 Jcoin 解锁」的漫画一律命名为 ... [禁漫去碼]，免费本用的是
+     *   [無修正]/[手工去碼]/[AI Generated] 等其它写法。920 本 album 采样：
+     *   name 含「禁漫去碼」30 本，其中 price=100 & purchased=false 30 本（零反例）；
+     *   反向 price 非空但名字无标记 0 本。列表接口不带 price/purchased 字段，
+     *   名字标记是列表侧唯一的解锁判据。
+     *
+     * 为什么用名字匹配而不是逐本请求 album：列表页一次渲染上百张卡，逐本请求
+     * 会打爆线路（站点有超时/限流），且首屏会长时间无角标。
+     */
+    private val LOCK_JS: String = """
+(function () {
+  if (window.__jmLockBadge) return;
+  window.__jmLockBadge = 1;
+  var SID = 'jm-lock-badge';
+  // 只认「禁漫去碼」（含简体「禁漫去码」）；其它去码写法（無修正/手工去碼）是免费本，不能误伤。
+  var MARK = /禁漫去[碼码]/;
+  function ensureStyle() {
+    var st = document.getElementById(SID);
+    if (!st) {
+      st = document.createElement('style');
+      st.id = SID;
+      (document.head || document.documentElement).appendChild(st);
+    }
+    var css =
+      '.jm-lock-badge{position:absolute;left:50%;bottom:4px;transform:translateX(-50%);z-index:6;' +
+        'display:inline-flex;align-items:center;max-width:calc(100% - 56px);overflow:hidden;' +
+        'background:rgba(214,48,49,.92);color:#fff;font-weight:600;' +
+        'border-radius:5px;padding:0 4px;line-height:1.55;white-space:nowrap;' +
+        'font-size:clamp(9px,2.4vw,12px);pointer-events:none;' +
+        'box-shadow:0 1px 3px rgba(0,0,0,.4);}' +
+      '.jm-lock-badge::before{content:"\\1F512 ";margin-right:2px;font-size:.85em;}';
+    if (st.textContent !== css) st.textContent = css;
+  }
+  // 卡片结构（首页是 swiper-slide，分类/搜索是 .grid.grid-cols-3 > div；两者内层同构）：
+  //   卡片 > div.relative > a > img（角标挂 div.relative）+ 兄弟 p.truncate(标题)
+  function apply() {
+    var cards = window.__jmCards ? window.__jmCards()
+      : document.querySelectorAll('div.swiper-slide, .grid.grid-cols-3 > div');
+    for (var i = 0; i < cards.length; i++) {
+      var card = cards[i];
+      var box = card.querySelector(':scope > div.relative');
+      if (!box || !box.querySelector('img')) continue;
+      var p = card.querySelector('p.truncate');
+      var hit = !!p && MARK.test(p.textContent || '');
+      var el = box.querySelector('.jm-lock-badge');
+      if (hit && !el) {
+        el = document.createElement('span');
+        el.className = 'jm-lock-badge';
+        el.textContent = '未解锁';
+        box.appendChild(el);
+      } else if (!hit && el && el.parentNode) {
+        el.parentNode.removeChild(el);
+      }
+    }
+  }
+  ensureStyle();
+  apply();
+  // 常驻低频重扫：SPA 路由切换/分页渲染出新卡片时自动补标。
+  // 不用 MutationObserver 监听 documentElement：本函数会改 DOM，容易自激（参见 GRIDFIX 白屏事故）。
+  setInterval(function () {
+    if (!document.getElementById(SID)) { ensureStyle(); }
+    apply();
+  }, 600);
+})();
+""".trimIndent()
+
         /** 组装本次注入的 JS：按开关裁剪占位符。 */
         private fun buildPatch(): String {
             val adBlock = Config.enabled(Config.K_AD_BLOCK)
             val autoSkip = Config.enabled(Config.K_AUTO_SKIP)
+            val glass = Config.enabled(Config.K_BOTTOM_GLASS) && adBlock
+            val tabSimple = Config.enabled(Config.K_TAB_SIMPLE)
             val q = '"'
             return JS_TEMPLATE
                 .replace("@@ADFREE@@", if (adBlock) "v = enforceAdFree(v);" else "")
@@ -235,6 +473,26 @@ class MainHook : XposedModule() {
                     else ""
                 )
                 .replace("@@SCANNER@@", if (autoSkip) "try { startCoverSkip(); } catch (e) {}" else "")
+                // ⑤ iOS 透明液态玻璃底栏：仅当去广告开启时注入（glass=gated by adBlock 见上）
+                .replace(
+                    "@@GLASS@@",
+                    if (glass)
+                        GLASS_JS
+
+                    else ""
+                )
+                // ⑥ 精简底栏：隐藏 游戏/论坛 tab（独立开关）
+                .replace(
+                    "@@TABS@@",
+                    if (tabSimple) TAB_JS else ""
+                )
+                // ⑦ 列表封面图字对齐 + 每格限制框 + 分辨率自适应
+                .replace("@@GRIDFIX@@", GRIDFIX_JS)
+                // ⑨ 未解锁角标（独立开关）
+                .replace(
+                    "@@LOCK@@",
+                    if (Config.enabled(Config.K_LOCK_BADGE)) LOCK_JS else ""
+                )
         }
         /** 解码内嵌繁→简脚本并缓存；失败只影响繁→简，去广告不受影响。 */
         private fun t2sScript(): String? {
@@ -559,12 +817,11 @@ class MainHook : XposedModule() {
             val wv = chain.getArg(0)
             if (wv is WebView) {
                 val patch = buildPatch()
-                if (Config.enabled(Config.K_T2S)) {
-                    val t2s = t2sScript()
-                    wv.evaluateJavascript(if (t2s == null) patch else patch + "\n" + t2s, null)
-                } else {
-                    wv.evaluateJavascript(patch, null)
-                }
+                val t2s = if (Config.enabled(Config.K_T2S)) t2sScript() else null
+                val js = if (t2s == null) patch else patch + "\n" + t2s
+                log(TAG + " 注入 JS: patch=" + patch.length + " t2s=" + (t2s?.length ?: 0) +
+                        " total=" + js.length)
+                wv.evaluateJavascript(js, null)
             }
         } catch (t: Throwable) {
             log(TAG + " JS 注入失败: " + t)
